@@ -1,0 +1,146 @@
+esphome:
+  name: iboost-esp32
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    version: recommended
+
+external_components:
+  - source:
+      type: local
+      path: iboost_esp32/esphome/components
+    components:
+      - cc1101
+      - iboost
+
+cc1101:
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    iboost: DEBUG  # Show iboost component debug messages
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+
+mdns:
+  disabled: false
+
+# Bluetooth Proxy for Home Assistant
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+
+bluetooth_proxy:
+  active: true
+
+sensor:
+  - platform: iboost
+    id: iboost_sensor_id
+    heating_import:
+      name: "iBoost Import"
+      unit_of_measurement: "W"
+      accuracy_decimals: 0
+      icon: "mdi:solar-power"
+    heating_power:
+      name: "iBoost Power"
+      unit_of_measurement: "W"
+      accuracy_decimals: 0
+      icon: "mdi:solar-power"
+      device_class: power
+    heating_today:
+      name: "iBoost Today"
+      unit_of_measurement: "Wh"
+      accuracy_decimals: 0
+      device_class: energy
+      icon: "mdi:solar-power"
+      state_class: total_increasing
+    heating_yesterday:
+      name: "iBoost Yesterday"
+      unit_of_measurement: "Wh"
+      accuracy_decimals: 0
+      icon: "mdi:solar-power"
+      device_class: energy
+      state_class: total_increasing
+    heating_last_7:
+      name: "iBoost Last 7 Days"
+      unit_of_measurement: "Wh"
+      accuracy_decimals: 0
+      icon: "mdi:solar-power"
+      state_class: total_increasing
+      device_class: energy
+    heating_last_28:
+      name: "iBoost Last 28 Days"
+      unit_of_measurement: "Wh"
+      accuracy_decimals: 0
+      icon: "mdi:solar-power"
+      device_class: energy
+      state_class: total_increasing
+    heating_last_gt:
+      name: "iBoost Total"
+      unit_of_measurement: "Wh"
+      accuracy_decimals: 0
+      icon: "mdi:solar-power"
+      device_class: energy
+      state_class: total_increasing
+    heating_boost_time:
+      name: "iBoost Boost Time Remaining"
+      unit_of_measurement: "min"
+      accuracy_decimals: 0
+      device_class: duration
+      icon: "mdi:solar-power"
+    heating_mode:
+      name: "iBoost Mode"
+      icon: "mdi:solar-power"
+    heating_warn:
+      name: "iBoost Warn"
+      icon: "mdi:solar-power"
+    tank_hot:
+      name: "Tank Hot"
+      icon: "mdi:thermometer-water"
+    sender_battery_low:
+      name: "Sender Battery Low"
+      icon: "mdi:battery-alert"
+
+button:
+  - platform: template
+    name: "iBoost Manual Boost START"
+    id: BoostStart
+    icon: "mdi:solar-power"
+    on_press:
+      then:
+        - lambda: |-
+            id(iboost_sensor_id)->boost(id(boostTime).state);
+
+  - platform: template
+    name: "iBoost Manual Boost CANCEL"
+    id: BoostCancel
+    icon: "mdi:solar-power"
+    on_press:
+      then:
+        - lambda: |-
+            id(iboost_sensor_id)->boost(0);
+
+number:
+  - platform: template
+    name: "iBoost Manual Boost Time"
+    id: boostTime
+    icon: "mdi:solar-power"
+    unit_of_measurement: "Minutes"
+    optimistic: true
+    initial_value: 15
+    min_value: 0
+    max_value: 120
+    step: 15

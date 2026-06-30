@@ -13,11 +13,11 @@ esp8266:
 external_components:
   - source:
       type: git
-      url: https://github.com/JNSwanson/ESP-Home-iBoost/
+      url: https://github.com/8none1/ESP-Home-iBoost/
       #type: local # Alternative.  Clone from git and point to the local files:
-      #path: "C:\\Users\\<your Name>\\iboostSrc\\ESP-Home-iBoost\\esphome\\components" 
+      #path: "C:\\Users\\<your Name>\\iboostSrc\\ESP-Home-iBoost\\esphome\\components"
     components:
-      - cc1101    
+      - cc1101
       - iboost
  
 cc1101:
@@ -138,6 +138,14 @@ sensor:
     heating_warn:
       name: "iBoost Warn"
       icon: "mdi:solar-power"
+
+    tank_hot:
+      name: "Tank Hot"
+      icon: "mdi:thermometer-water"
+
+    sender_battery_low:
+      name: "Sender Battery Low"
+      icon: "mdi:battery-alert"
 
 
 

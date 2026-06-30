@@ -50,6 +50,23 @@ namespace esphome {
         // Global instance
         iBoost * global_iboost = nullptr;
 
+        // Global sensor pointers (defined here, declared extern in header)
+        sensor::Sensor *heating_import = nullptr;
+        sensor::Sensor *heating_power = nullptr;
+        sensor::Sensor *heating_today = nullptr;
+        sensor::Sensor *heating_yesterday = nullptr;
+        sensor::Sensor *heating_last_7 = nullptr;
+        sensor::Sensor *heating_last_28 = nullptr;
+        sensor::Sensor *heating_last_gt = nullptr;
+        sensor::Sensor *heating_boost_time = nullptr;
+        text_sensor::TextSensor *heating_mode = nullptr;
+        text_sensor::TextSensor *heating_warn = nullptr;
+        binary_sensor::BinarySensor *tank_hot = nullptr;
+        binary_sensor::BinarySensor *sender_battery_low = nullptr;
+
+        // Battery low flag - bit 1 of SENDER packet byte[3]
+        static const uint8_t SENDER_FLAG_BATTERY_LOW = 0x02;
+
         enum { // codes for the various requests and responses
             SAVED_TODAY = 0xCA,
                 SAVED_YESTERDAY = 0xCB,
@@ -94,14 +111,26 @@ namespace esphome {
         byte pkt_size;
         short heating;
         long p1, p2;
-        char pbuf[32];
         byte boostTime;
-        bool waterHeating, cylinderHot, batteryLow, overheat;
+        bool waterHeating, cylinderHot, overheat;
 
-        // Register component
-        void register_iboost() {
-            global_iboost = new iBoost();
-            App.register_component(global_iboost);
+        // Helper to create signal strength/quality bar (1-5 scale)
+        // RSSI: typically -90dBm (weak) to -50dBm (strong)
+        // LQI: typically 0 (best) to 127 (worst)
+        const char* rssi_to_bars(int rssi) {
+            if (rssi >= -55) return "[█████] 5/5";
+            if (rssi >= -65) return "[████░] 4/5";
+            if (rssi >= -75) return "[███░░] 3/5";
+            if (rssi >= -85) return "[██░░░] 2/5";
+            return "[█░░░░] 1/5";
+        }
+
+        const char* lqi_to_bars(int lqi) {
+            if (lqi <= 10)  return "[█████] 5/5";
+            if (lqi <= 25)  return "[████░] 4/5";
+            if (lqi <= 50)  return "[███░░] 3/5";
+            if (lqi <= 80)  return "[██░░░] 2/5";
+            return "[█░░░░] 1/5";
         }
 
         void iBoost::setup() {
@@ -123,21 +152,19 @@ namespace esphome {
             if (heating_last_gt) heating_last_gt -> publish_state(0);
             if (heating_boost_time) heating_boost_time -> publish_state(0);
 
+            // Initialize binary sensors
+            if (tank_hot != nullptr) tank_hot -> publish_state(false);
+
             addressLQI = 255; // set received LQI to lowest value
             addressValid = false;
             SPI.begin();
-            Serial.println("SPI OK");
-            ESP_LOGW(TAG, "SPI OK");
+            ESP_LOGI(TAG, "SPI initialized");
             radio.reset();
-            Serial.println("RadioReset");
             radio.begin(868.300e6); // Freq=868.3Mhz. Do not forget the "e6"
-            Serial.println("RadioReg");
             radio.setMaxPktSize(61);
-            Serial.println("RadioReg");
-            radio.writeRegister(CC1101_FREQ2, 0x21); // 868.300MHz  (868300000 <<16)/26000000
-            Serial.println("RadioReg");
+            radio.writeRegister(CC1101_FREQ2, 0x21); // 868.350MHz (custom frequency tuning)
             radio.writeRegister(CC1101_FREQ1, 0x65);
-            radio.writeRegister(CC1101_FREQ0, 0x6a);
+            radio.writeRegister(CC1101_FREQ0, 0xe8); // Custom: 0xe8 for 868.350MHz (better LQI)
             radio.writeRegister(CC1101_FSCTRL1, 0x08); // fif=203.125kHz
             radio.writeRegister(CC1101_FSCTRL0, 0x00); // No offset
             radio.writeRegister(CC1101_MDMCFG4, 0x5B); // CHANBW_E = 1 CHANBW_M=1 BWchannel =325kHz   DRATE_E=11
@@ -181,16 +208,13 @@ namespace esphome {
             };
             radio.writeBurstRegister(CC1101_PATABLE, paTable, sizeof(paTable));
 
-            radio.strobe(CC1101_SIDLE); //
-            radio.strobe(CC1101_SPWD); //
+            radio.strobe(CC1101_SIDLE);
+            radio.strobe(CC1101_SPWD);
 
-            Serial.println("Radio OK");
             radio.setRXstate(); // Set the current state to RX : listening for RF packets
-            Serial.println("Radio RX OK");
-            // LED setup. It is importand as we can use the module without serial terminal
+            // LED setup for visual feedback
             pinMode(LED_BUILTIN, OUTPUT);
-            Serial.println("Setup Finished");
-            ESP_LOGW(TAG, "Setup Finished");
+            ESP_LOGI(TAG, "iBoost radio initialized @ 868.350MHz, listening for packets");
         }
 
         void iBoost::boost(uint8_t boost_time) {
@@ -199,24 +223,20 @@ namespace esphome {
         }
 
         void iBoost::update() {
-            //Serial.println("Update ****");
-            if (heating_warn -> has_state()) {
-                if (batteryLow)
-                    heating_warn -> publish_state("Sender Battery LOW");
-                else
-                    heating_warn -> publish_state("");
-            }
+            // Only publish periodically, actual state changes are handled in packet processing
         }
 
         void iBoost::loop() {
 
-            // Turn on the LED for 200ms without blocking the loop.
-            // The Buildin LED on NodeMCU is ON when LOW
-            digitalWrite(LED_BUILTIN, millis() - ledTimer > 200);
+            // Turn on the LED briefly after receiving a packet (LED is active LOW on NodeMCU)
+            digitalWrite(LED_BUILTIN, millis() - ledTimer > LED_BLINK_DURATION_MS);
 
             if (addressValid) {
-                if ((millis() - pingTimer > 10000) || boostRequest) { // ping every 10sec
-                    if ((millis() - rxTimer) > 1000 && (millis() - rxTimer) < 2000) {
+                // Send ping requests every PING_INTERVAL_MS, or immediately if boost requested
+                if ((millis() - pingTimer > PING_INTERVAL_MS) || boostRequest) {
+                    // Only transmit within a specific window after last RX to avoid collisions
+                    uint32_t timeSinceRx = millis() - rxTimer;
+                    if (timeSinceRx > TX_WINDOW_START_MS && timeSinceRx < TX_WINDOW_END_MS) {
                         memset(txBuf, 0, sizeof(txBuf));
                         if ((request < 0xca) ||
                             (request > 0xce)
@@ -252,7 +272,7 @@ namespace esphome {
                         radio.strobe(CC1101_SFRX);
                         radio.strobe(CC1101_SIDLE);
                         radio.strobe(CC1101_SRX);
-                        Serial.println("Sending request");
+                        ESP_LOGD(TAG, "Sent request 0x%02X", request);
                         request++;
                         pingTimer = millis();
                         return;
@@ -270,40 +290,16 @@ namespace esphome {
                 if (pkt_size > 0 && radio.crcok()) { // We have a valid packet with some data
                     rxTimer = millis();
                     rxLQI = radio.getLQI();
-                    Serial.print("Got packet from ");
-                    if (packet[2] == PACKET_BUDDY) Serial.print("Buddy,");
-                    else if (packet[2] == PACKET_IBOOST) Serial.print("iBoost,");
-                    else if (packet[2] == PACKET_SENDER) Serial.print("Sender,");
-                    else Serial.print("Unknown,");
-                    Serial.print("Address=0x");
-                    sprintf(pbuf, "%02x", packet[0]);
-                    Serial.print(pbuf);
-                    sprintf(pbuf, "%02x", packet[1]);
-                    Serial.print(pbuf);
-                    // Debug output
-                    /*for (int i = 0; i < pkt_size; i++) {
-                      sprintf(pbuf, "%02x", packet[i]);
-                      Serial.print(pbuf); //packet[i], HEX);
-                      Serial.print(",");
-                    }*/
-                    Serial.print(",len=");
-                    Serial.print(pkt_size);
-                    Serial.print(" Signal="); // for field tests to check the signal strength
-                    Serial.print(radio.getRSSIdbm());
-                    Serial.print(" LQI="); // for field tests to check the signal quality
-                    Serial.println(rxLQI);
                     if ((packet[2] == PACKET_BUDDY && pkt_size == 29) // buddy request
                         ||
                         (packet[2] == PACKET_SENDER && pkt_size == 44) // sender packet
                     ) {
                         if (rxLQI < addressLQI) { // is the signal stronger than the previous/none
                             addressLQI = rxLQI;
-                            address[0] = packet[0]; // save the address of the packet	0x1c7b; //
+                            address[0] = packet[0];
                             address[1] = packet[1];
                             addressValid = true;
-                            Serial.print("Updated the address to:");
-                            sprintf(pbuf, "%02x,%02x", address[0], address[1]);
-                            Serial.println(pbuf);
+                            ESP_LOGI(TAG, "Updated address to: %02x%02x", address[0], address[1]);
                         }
                     }
                     ledTimer = millis();
@@ -312,36 +308,26 @@ namespace esphome {
                 break;
 
             case RXSTATE_PROCESS_PACKET:
-                Serial.println("Processing Packet");
+                {
+                    int rssi_dbm = radio.getRSSIdbm();
+                    const char* pkt_type = (packet[2] == PACKET_IBOOST) ? "IBOOST" :
+                                           (packet[2] == PACKET_SENDER) ? "SENDER" :
+                                           (packet[2] == PACKET_BUDDY)  ? "BUDDY" : "UNKNOWN";
+                    ESP_LOGI(TAG, "%s: Strength %s (%ddBm)  Quality %s (LQI=%d)", 
+                             pkt_type, rssi_to_bars(rssi_dbm), rssi_dbm, lqi_to_bars(rxLQI), rxLQI);
+                }
+
                 if (packet[2] == PACKET_IBOOST) {
-                    heating = ( * (short * ) & packet[16]);
-                    p1 = ( * (long * ) & packet[18]);
-                    p2 = ( * (long * ) & packet[25]); // this depends on the request
-                    if (packet[6])
-                        waterHeating = false;
-                    else
-                        waterHeating = true;
-                    if (packet[7])
-                        cylinderHot = true;
-                    else
-                        cylinderHot = false;
-                    if(packet[13]) // this indicates the iBoost unit is overheating
-                        overheat = true;
-                    else
-                        overheat = false;
-                    boostTime = packet[5]; // boost time remaining (minutes)
-                    //Serial.print("Heating=");
-                    //Serial.print(heating );
-                    Serial.print("P1=");
-                    Serial.print(p1);
-                    Serial.print(",Import=");
-                    Serial.print(p1 / 360);
-                    Serial.print(",P2=");
-                    Serial.print(p2);
-                    //Serial.print(",P3=");
-                    //Serial.print((* (signed long*) &packet[29]) );
-                    //Serial.print(" Power 4=");
-                    //Serial.print((* (signed long*) &packet[30]) );
+                    // Parse packet data using safe casts
+                    heating = *reinterpret_cast<short*>(&packet[16]);
+                    p1 = *reinterpret_cast<long*>(&packet[18]);
+                    p2 = *reinterpret_cast<long*>(&packet[25]);
+                    
+                    // Parse status flags
+                    waterHeating = (packet[6] == 0);
+                    cylinderHot = (packet[7] != 0);
+                    overheat = (packet[13] != 0);
+                    boostTime = packet[5];
                     switch (packet[24]) {
                     case SAVED_TODAY:
                         today = p2;
@@ -361,85 +347,84 @@ namespace esphome {
                         total = p2;
                         break;
                     }
-                    if(overheat)
-                        Serial.print(",Overheat Check Vents");
-                    else if (cylinderHot)
-                        Serial.print(",Water Tank HOT");
-                    else if (boostTime > 0)
-                        Serial.print(",Manual Boost ON");
-                    else if (waterHeating) {
-                        Serial.print(",Heating by Solar=");
-                        Serial.print(heating);
-                    } else
-                        Serial.print(",Water Heating OFF");
-                    if (batteryLow)
-                        Serial.print(",Warn=Sender Battery LOW");
-                    else
-                        Serial.print(",Warn=");
-                    Serial.print(",Today=");
-                    Serial.print(today);
-                    Serial.print(",Yesterday=");
-                    Serial.print(yesterday);
-                    Serial.print(",Last 7 Days=");
-                    Serial.print(last7);
-                    Serial.print(",Last 28 Days=");
-                    Serial.print(last28);
-                    Serial.print(",Total=");
-                    Serial.print(total);
-                    Serial.print(",Boost Time=");
-                    Serial.println(boostTime);
+                    ESP_LOGI(TAG, "IBOOST: power=%dW, import=%ldW, tank_hot=%s, boost=%dmin",
+                             heating, p1/360, cylinderHot ? "YES" : "NO", boostTime);
+                    ESP_LOGD(TAG, "IBOOST: today=%ld, yesterday=%ld, 7day=%ld, 28day=%ld, total=%ld",
+                             today, yesterday, last7, last28, total);
+                    if (overheat) {
+                        ESP_LOGW(TAG, "IBOOST: OVERHEAT DETECTED!");
+                    }
                     rxState = RXSTATE_PUBLISH_RESULTS; // publish the new values
                     break;
 
                 } else if (packet[2] == PACKET_SENDER) { // sender packet
-                    // Battery low flag is bit 1 of SENDER packet byte[3]
-                    static const uint8_t SENDER_FLAG_BATTERY_LOW = 0x02;
-
-                    batteryLow = (packet[3] & SENDER_FLAG_BATTERY_LOW) != 0;   
+                    // Check battery status - bit 1 of byte[3] indicates low battery
+                    bool batteryLow = (packet[3] & SENDER_FLAG_BATTERY_LOW) != 0;
+                    
+                    // Log both byte[3] (our finding) and byte[12] (upstream's claim) for comparison
+                    ESP_LOGD(TAG, "SENDER: byte[3]=0x%02X, byte[12]=0x%02X %s",
+                             packet[3], packet[12], batteryLow ? "<-- BATTERY LOW" : "");
+                    
+                    // Publish battery status
+                    if (sender_battery_low != nullptr) {
+                        sender_battery_low->publish_state(batteryLow);
+                    }
+                } else if (packet[2] == PACKET_BUDDY) {
+                    ESP_LOGD(TAG, "BUDDY packet received (address discovery)");
+                } else {
+                    ESP_LOGD(TAG, "Unknown packet type 0x%02X", packet[2]);
                 }
                 rxState = RXSTATE_WAIT_FOR_PACKET; // no update so wait for a new packet
                 break;
 
             case RXSTATE_PUBLISH_RESULTS:
-                Serial.println("Publishing results");
-                if (heating_mode -> has_state()) {
-                    if(overheat)
-                        heating_mode -> publish_state("Overheat. Check Vents");
+                // Publish mode status (priority: overheat > hot > boost > solar > off)
+                if (heating_mode != nullptr) {
+                    if (overheat)
+                        heating_mode->publish_state("Overheat. Check Vents");
                     else if (cylinderHot)
-                        heating_mode -> publish_state("Water Tank HOT");
+                        heating_mode->publish_state("Water Tank HOT");
                     else if (boostTime > 0)
-                        heating_mode -> publish_state("Manual Boost ON");
+                        heating_mode->publish_state("Manual Boost ON");
                     else if (waterHeating)
-                        heating_mode -> publish_state("Heating by Solar");
+                        heating_mode->publish_state("Heating by Solar");
                     else
-                        heating_mode -> publish_state("Water Heating OFF");
+                        heating_mode->publish_state("Water Heating OFF");
                 }
-                heating_import -> publish_state(p1 / 360);
-                heating_power -> publish_state(heating);
+                
+                // Publish power sensors
+                if (heating_import != nullptr) heating_import->publish_state(p1 / 360);
+                // Only report diverted power when the element is actually on
+                // (packet[6]==0 -> waterHeating). When it's off the iBoost still
+                // reports a few watts of CT measurement noise, which otherwise
+                // shows as a phantom <20W reading in Home Assistant.
+                if (heating_power != nullptr) heating_power->publish_state(waterHeating ? heating : 0);
+                
+                // Publish historical data based on which request we got back
                 switch (packet[24]) {
                 case SAVED_TODAY:
-                    heating_today -> publish_state(today);
+                    if (heating_today != nullptr) heating_today->publish_state(today);
                     break;
                 case SAVED_YESTERDAY:
-                    heating_yesterday -> publish_state(yesterday);
+                    if (heating_yesterday != nullptr) heating_yesterday->publish_state(yesterday);
                     break;
                 case SAVED_LAST_7:
-                    if (last7 > 0) {
-                        heating_last_7 -> publish_state(last7);
-                    }
+                    if (heating_last_7 != nullptr && last7 > 0) heating_last_7->publish_state(last7);
                     break;
                 case SAVED_LAST_28:
-                    if (last28 > 0) {
-                        heating_last_28 -> publish_state(last28);
-                    }
+                    if (heating_last_28 != nullptr && last28 > 0) heating_last_28->publish_state(last28);
                     break;
                 case SAVED_TOTAL:
-                    if (total > 0) {
-                        heating_last_gt -> publish_state(total);
-                    }
+                    if (heating_last_gt != nullptr && total > 0) heating_last_gt->publish_state(total);
                     break;
                 }
-                heating_boost_time -> publish_state(boostTime);
+                
+                if (heating_boost_time != nullptr) heating_boost_time->publish_state(boostTime);
+
+                // Publish tank_hot binary sensor state
+                if (tank_hot != nullptr) {
+                    tank_hot->publish_state(cylinderHot);
+                }
 
                 rxState = RXSTATE_WAIT_FOR_PACKET;
                 break;

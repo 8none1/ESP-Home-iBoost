@@ -69,16 +69,19 @@ SOFTWARE.
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/cc1101/cc1101.h"
 
 namespace esphome {
 namespace iboost {
-	
-#define PRINTLN(x, ...) Serial.println(x, ##__VA_ARGS__)
-#define PRINT(x, ...) Serial.print(x, ##__VA_ARGS__)
-
 
 static const char *const TAG = "iboost";
+
+// Timing constants (milliseconds)
+static const uint32_t PING_INTERVAL_MS = 10000;      // Time between pings
+static const uint32_t LED_BLINK_DURATION_MS = 200;   // LED on time after packet
+static const uint32_t TX_WINDOW_START_MS = 1000;     // Start of transmit window after RX
+static const uint32_t TX_WINDOW_END_MS = 2000;       // End of transmit window after RX
 
 extern sensor::Sensor *heating_import;
 extern sensor::Sensor *heating_power;
@@ -90,6 +93,8 @@ extern sensor::Sensor *heating_last_gt;
 extern sensor::Sensor *heating_boost_time;
 extern text_sensor::TextSensor *heating_mode;
 extern text_sensor::TextSensor *heating_warn;
+extern binary_sensor::BinarySensor *tank_hot;
+extern binary_sensor::BinarySensor *sender_battery_low;
 
 extern long today, yesterday, last7, last28, total;
 
@@ -106,7 +111,7 @@ class iBoost : public PollingComponent {
   void loop() override;
   void update() override;
   void boost(uint8_t boost_time);
-  
+
 
     void set_heating_import(sensor::Sensor *sensor) { heating_import = sensor; }
     void set_heating_power(sensor::Sensor *sensor) { heating_power = sensor; }
@@ -118,22 +123,10 @@ class iBoost : public PollingComponent {
     void set_heating_boost_time(sensor::Sensor *sensor) { heating_boost_time = sensor; }
     void set_heating_mode(text_sensor::TextSensor *sensor) { heating_mode = sensor; }
     void set_heating_warn(text_sensor::TextSensor *sensor) { heating_warn = sensor; }
+    void set_tank_hot(binary_sensor::BinarySensor *sensor) { tank_hot = sensor; }
+    void set_sender_battery_low(binary_sensor::BinarySensor *sensor) { sender_battery_low = sensor; }
 
 private:
-    sensor::Sensor *heating_import{nullptr};
-    sensor::Sensor *heating_power{nullptr};
-    sensor::Sensor *heating_today{nullptr};
-    sensor::Sensor *heating_yesterday{nullptr};
-    sensor::Sensor *heating_last_7{nullptr};
-    sensor::Sensor *heating_last_28{nullptr};
-    sensor::Sensor *heating_last_gt{nullptr};
-    sensor::Sensor *heating_boost_time{nullptr};
-    text_sensor::TextSensor *heating_mode{nullptr};
-    text_sensor::TextSensor *heating_warn{nullptr};
-
-  
-  esphome::cc1101::CC1101 radio;
-  
   float get_setup_priority() const override { return esphome::setup_priority::LATE; }
 
 

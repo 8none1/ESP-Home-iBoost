@@ -1,15 +1,18 @@
 import esphome.codegen as cg
 import esphome.components.sensor as sensor
 import esphome.components.text_sensor as text_sensor
+import esphome.components.binary_sensor as binary_sensor
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 from esphome.const import (
     UNIT_WATT, UNIT_WATT_HOURS, UNIT_MINUTE,
     DEVICE_CLASS_POWER, DEVICE_CLASS_ENERGY, DEVICE_CLASS_DURATION,
+    DEVICE_CLASS_HEAT, DEVICE_CLASS_BATTERY,
     STATE_CLASS_TOTAL_INCREASING, ICON_FLASH
 )
 
 DEPENDENCIES = ["cc1101"]
+AUTO_LOAD = ["sensor", "text_sensor", "binary_sensor"]
 
 # Define iBoost component namespace
 iboost_ns = cg.esphome_ns.namespace("iboost")
@@ -53,6 +56,14 @@ CONFIG_SCHEMA = cv.Schema(
         # Text Sensors
         cv.Optional("heating_mode"): text_sensor.text_sensor_schema(),
         cv.Optional("heating_warn"): text_sensor.text_sensor_schema(),
+
+        # Binary Sensors
+        cv.Optional("tank_hot"): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_HEAT
+        ),
+        cv.Optional("sender_battery_low"): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_BATTERY
+        ),
     }
 )
 
@@ -73,4 +84,13 @@ async def to_code(config):
 
     if "heating_warn" in config:
         warn_sensor = await text_sensor.new_text_sensor(config["heating_warn"])
-        cg.add(var.set_heating_warn(warn_sensor))  
+        cg.add(var.set_heating_warn(warn_sensor))
+
+    # Register binary sensors
+    if "tank_hot" in config:
+        tank_hot_sensor = await binary_sensor.new_binary_sensor(config["tank_hot"])
+        cg.add(var.set_tank_hot(tank_hot_sensor))
+
+    if "sender_battery_low" in config:
+        battery_low_sensor = await binary_sensor.new_binary_sensor(config["sender_battery_low"])
+        cg.add(var.set_sender_battery_low(battery_low_sensor))  

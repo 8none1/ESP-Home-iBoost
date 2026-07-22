@@ -99,6 +99,13 @@ namespace esphome {
 
         uint32_t rxTimer;
 
+        // Time (millis) of the last decoded IBOOST packet. Used by the watchdog
+        // in update() to zero the reported power when the iBoost stops
+        // transmitting (e.g. relay switched off to export instead of divert),
+        // otherwise the last value stays frozen on the dashboard.
+        uint32_t lastIBoostTime = 0;
+        static const uint32_t IBOOST_PKT_TIMEOUT_MS = 90000;
+
         //static uint8_t txStart[] = {CC1101_SIDLE, CC1101_TXFIFO, CC1101_AGCCTRL0};
         uint8_t txBuf[32];
         uint8_t request;
@@ -223,7 +230,16 @@ namespace esphome {
         }
 
         void iBoost::update() {
-            // Only publish periodically, actual state changes are handled in packet processing
+            // Watchdog: if we've stopped receiving IBOOST packets the unit is
+            // powered down (e.g. relay off), so force reported power to 0
+            // instead of leaving the last decoded value frozen on the dashboard.
+            if (lastIBoostTime != 0 && (millis() - lastIBoostTime > IBOOST_PKT_TIMEOUT_MS)) {
+                if (heating_power != nullptr && heating_power->state != 0) {
+                    ESP_LOGI(TAG, "No IBOOST packet for >%lus - forcing power to 0W",
+                             (unsigned long)(IBOOST_PKT_TIMEOUT_MS / 1000));
+                    heating_power->publish_state(0);
+                }
+            }
         }
 
         void iBoost::loop() {
@@ -318,6 +334,7 @@ namespace esphome {
                 }
 
                 if (packet[2] == PACKET_IBOOST) {
+                    lastIBoostTime = millis();  // mark last live power reading for the watchdog
                     // Parse packet data using safe casts
                     heating = *reinterpret_cast<short*>(&packet[16]);
                     p1 = *reinterpret_cast<long*>(&packet[18]);
